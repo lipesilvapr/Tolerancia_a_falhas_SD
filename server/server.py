@@ -1,9 +1,10 @@
 import os
 import time
+import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib import request
 
-REPLICA_URL = "http://127.0.0.1:8001"
+REPLICA_URL = "127.0.0.1"
+REPLICA_PORT = 8001
 
 class CoordinatorHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -35,7 +36,7 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
                         sent += len(chunk)
                         self.wfile.flush()
                         time.sleep(0.05)
-                        if sent > 5 * 1024 * 1024:
+                        if sent > 5 * 1024 * 1024:  # Simula falha após ~5MB
                             raise Exception("💥 Falha simulada no coordenador")
                 print(f"[Coordinator] ✅ Download completo pelo coordenador")
             except Exception as e:
@@ -49,24 +50,51 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
     def _continuar_pela_replica(self, filename, start_byte):
         print(f"[Coordinator] Conectando à réplica a partir do byte {start_byte}...")
 
-        req = request.Request(
-            f"{REPLICA_URL}/files/{filename}",
-            headers={"Range": f"bytes={start_byte}-"}
+        host = REPLICA_URL
+        port = REPLICA_PORT
+        path = f"/files/{filename}"
+        headers = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"Range: bytes={start_byte}-\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
         )
-        try:
-            with request.urlopen(req) as resp:
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((host, port))
+            s.sendall(headers.encode())
+
+            buffer = b""
+            while b"\r\n\r\n" not in buffer:
+                buffer += s.recv(4096)
+            _, _, buffer = buffer.partition(b"\r\n\r\n")
+
+            try:
                 while True:
-                    chunk = resp.read(64 * 1024)
+                    chunk = s.recv(64 * 1024)
                     if not chunk:
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
-            print(f"[Coordinator] ✅ Download finalizado com sucesso pela réplica")
-        except Exception as e:
-            print(f"[Coordinator] ❌ Erro ao continuar download da réplica: {e}")
-            self.wfile.write(b"\nErro ao continuar download da replica.")
+                print(f"[Coordinator] ✅ Download finalizado com sucesso pela réplica")
+            except Exception as e:
+                print(f"[Coordinator] ❌ Erro ao continuar download da réplica: {e}")
+                self.wfile.write(b"\nErro ao continuar download da replica.")
 
 if __name__ == "__main__":
-    server = HTTPServer(("localhost", 8000), CoordinatorHandler)
-    print("🔵 Coordenador rodando em http://localhost:8000")
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Uso: python server.py <porta>")
+        sys.exit(1)
+
+    try:
+        porta = int(sys.argv[1])
+    except ValueError:
+        print("Porta inválida. Deve ser um número.")
+        sys.exit(1)
+
+    server = HTTPServer(("localhost", porta), CoordinatorHandler)
+    print(f"🔵 Coordenador rodando em http://localhost:{porta}")
     server.serve_forever()
