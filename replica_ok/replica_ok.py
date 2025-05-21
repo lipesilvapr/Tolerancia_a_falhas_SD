@@ -1,41 +1,40 @@
+import socket
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+import time
 
-class ReplicaHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith("/files/"):
-            filename = self.path.split("/files/")[1]
-            file_path = os.path.join(os.path.dirname(__file__), filename)
+def handle_coord_request(conn):
+    payload = conn.recv(1024).decode()
+    client_ip, client_port, filename, offset = payload.split(":")
+    client_port = int(client_port)
+    offset = int(offset)
 
-            if not os.path.isfile(file_path):
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"Arquivo nao encontrado")
-                return
+    file_path = os.path.join(os.path.dirname(__file__), filename)
+    if not os.path.isfile(file_path):
+        print(f"[Replica] Arquivo não encontrado: {filename}")
+        return
 
-            file_size = os.path.getsize(file_path)
-            range_header = self.headers.get("Range")
-            start = 0
-            if range_header:
-                start = int(range_header.strip().split("=")[1].split("-")[0])
+    print(f"[Replica] Iniciando envio para {client_ip}:{client_port} a partir do byte {offset}")
 
-            self.send_response(206 if range_header else 200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(file_size - start))
-            if range_header:
-                self.send_header("Content-Range", f"bytes {start}-{file_size - 1}/{file_size}")
-            self.end_headers()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_sock:
+        client_sock.connect((client_ip, client_port))
 
-            with open(file_path, "rb") as f:
-                f.seek(start)
-                while chunk := f.read(64 * 1024):
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-        else:
-            self.send_response(404)
-            self.end_headers()
+        with open(file_path, "rb") as f:
+            f.seek(offset)
+            while chunk := f.read(64 * 1024):
+                client_sock.sendall(chunk)
+                time.sleep(0.01)  # Aguarde um curto período antes de enviar o próximo bloco
+
+    print(f"[Replica] ✅ Envio finalizado para {client_ip}:{client_port}")
 
 if __name__ == "__main__":
-    server = HTTPServer(("localhost", 8001), ReplicaHandler)
-    print("🟡 Replica rodando em http://localhost:8001")
-    server.serve_forever()
+    host = "localhost"
+    port = 8001
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, port))
+        s.listen(5)
+        print(f"🟡 Réplica rodando em {host}:{port}")
+        while True:
+            conn, _ = s.accept()
+            threading.Thread(target=handle_coord_request, args=(conn,)).start()

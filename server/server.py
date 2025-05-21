@@ -1,100 +1,57 @@
+import socket
+import threading
 import os
 import time
-import socket
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
-REPLICA_URL = "127.0.0.1"
+REPLICA_HOST = "localhost"
 REPLICA_PORT = 8001
 
-class CoordinatorHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith("/download?file="):
-            filename = self.path.split("=")[1]
-            file_path = os.path.join(os.path.dirname(__file__), filename)
+def handle_client(conn, addr):
+    filename = conn.recv(1024).decode().strip()
+    file_path = os.path.join(os.path.dirname(__file__), filename)
 
-            if not os.path.isfile(file_path):
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"Arquivo nao encontrado")
-                return
+    if not os.path.isfile(file_path):
+        print(f"[Coordinator] Arquivo não encontrado: {filename}")
+        conn.close()
+        return
 
-            file_size = os.path.getsize(file_path)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Disposition", f"attachment; filename={filename}")
-            self.send_header("Content-Length", str(file_size))
-            self.end_headers()
+    file_size = os.path.getsize(file_path)
+    sent = 0
+    try:
+        print(f"[Coordinator] Enviando arquivo: {filename} ({file_size} bytes) para {addr[0]}:{addr[1]}")
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(64 * 1024)
+                if not chunk:
+                    break
+                conn.sendall(chunk)
+                sent += len(chunk)
+                time.sleep(0.05)
+                if sent > 10 * 1024 * 1024:
+                    raise Exception("💥 Falha simulada")
 
-            sent = 0
-            try:
-                with open(file_path, "rb") as f:
-                    while True:
-                        chunk = f.read(64 * 1024)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        sent += len(chunk)
-                        self.wfile.flush()
-                        time.sleep(0.05)
-                        if sent > 5 * 1024 * 1024:  # Simula falha após ~5MB
-                            raise Exception("💥 Falha simulada no coordenador")
-                print(f"[Coordinator] ✅ Download completo pelo coordenador")
-            except Exception as e:
-                print(f"[Coordinator] Falha detectada: {e}")
-                print(f"[Coordinator] Tentando continuar o download pela réplica...")
-                self._continuar_pela_replica(filename, sent)
-        else:
-            self.send_response(404)
-            self.end_headers()
+        print(f"[Coordinator] ✅ Envio completo: {filename}")
+    except Exception as e:
+        print(f"[Coordinator] ⚠️ Falha simulada: {e}")
+        conn.close()
+        print("[Coordinator] Notificando réplica para continuar...")
 
-    def _continuar_pela_replica(self, filename, start_byte):
-        print(f"[Coordinator] Conectando à réplica a partir do byte {start_byte}...")
+        notify_replica(addr[0], 9000, filename, sent)
 
-        host = REPLICA_URL
-        port = REPLICA_PORT
-        path = f"/files/{filename}"
-        headers = (
-            f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
-            f"Range: bytes={start_byte}-\r\n"
-            f"Connection: close\r\n"
-            f"\r\n"
-        )
-
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((host, port))
-            s.sendall(headers.encode())
-
-            buffer = b""
-            while b"\r\n\r\n" not in buffer:
-                buffer += s.recv(4096)
-            _, _, buffer = buffer.partition(b"\r\n\r\n")
-
-            try:
-                while True:
-                    chunk = s.recv(64 * 1024)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-                print(f"[Coordinator] ✅ Download finalizado com sucesso pela réplica")
-            except Exception as e:
-                print(f"[Coordinator] ❌ Erro ao continuar download da réplica: {e}")
-                self.wfile.write(b"\nErro ao continuar download da replica.")
+def notify_replica(client_ip, client_port, filename, start_byte):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((REPLICA_HOST, REPLICA_PORT))
+        payload = f"{client_ip}:{client_port}:{filename}:{start_byte}"
+        s.sendall(payload.encode())
 
 if __name__ == "__main__":
-    import sys
+    host = "localhost"
+    port = 8000
 
-    if len(sys.argv) < 2:
-        print("Uso: python server.py <porta>")
-        sys.exit(1)
-
-    try:
-        porta = int(sys.argv[1])
-    except ValueError:
-        print("Porta inválida. Deve ser um número.")
-        sys.exit(1)
-
-    server = HTTPServer(("localhost", porta), CoordinatorHandler)
-    print(f"🔵 Coordenador rodando em http://localhost:{porta}")
-    server.serve_forever()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, port))
+        s.listen(5)
+        print(f"🔵 Coordenador rodando em {host}:{port}")
+        while True:
+            conn, addr = s.accept()
+            threading.Thread(target=handle_client, args=(conn, addr)).start()
